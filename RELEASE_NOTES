@@ -1,32 +1,22 @@
-
-Unreleased
-- 2026-02-23 build(deps): bump actions/cache from 4 to 5 (#121)
-- 2026-02-23 build(deps): bump actions/checkout from 4 to 6 (#122)
-- 2026-02-23 build(deps): bump KyleMayes/install-llvm-action from 1 to 2 (#123)
-- 2026-02-23 build(deps): bump actions/setup-go from 5 to 6 (#124)
-- 2026-02-23 rename to `btls`
-- 2026-02-23 patch: sync upstream boringssl patch (#120)
-- 2026-02-23 Update README.md
+5.1.0
+- 2026-04-13 Add EVP_AEAD-based detached AEAD module
+- 2026-04-13 Add generic PKey private key generation API
+- 2026-04-13 Add TLS 1.2 PRF module and bindings
+- 2026-03-25 Add used_hello_retry_request
+- 2026-03-28 Prebuilt lib export option
+- 2026-03-27 Display sys crate errors using cargo::error
 
 5.0.2
 - 2026-02-13 Re-add fips-precompiled for v4 compat
 - 2026-02-12 Don't add build/ to non-FIPS pre-built path
 - 2026-02-13 Expose load_verify_locations like rust-openssl
-- 2026-02-13 Fix null handling, sync with rust-openssl
-- 2026-02-12 boring-sys: Support static MSVC runtime
+- 2026-02-12 Support static MSVC runtime
 
 5.0.1
-- 2026-02-11 Bump
-- 2026-02-10 README links
-- 2026-02-10 Support building without default features
 - 2026-02-03 Make SslCredential optional
 - 2026-02-10 Make ML-KEM optional
 - 2026-02-10 Don't always require all headers from all versions of BoringSSL
-- 2026-02-10 Backwards-compatible add_cert()
 - 2026-02-10 Ensure we don't leave unit memory if generate_key fails
-- 2026-02-10 Add missing error handling in ML-KEM generate
-- 2026-02-10 Don't always require all headers from all versions of BoringSSL
-- 2026-02-10 Make ML-KEM optional
 
 5.0.0
 - 2026-02-03 v5.0.0
