@@ -3535,6 +3535,47 @@ impl SslRef {
         unsafe { ffi::SSL_get_server_random(self.as_ptr(), buf.as_mut_ptr(), buf.len()) }
     }
 
+    /// Returns the X25519 ephemeral private key from the TLS 1.3 key share.
+    ///
+    /// Must be called after the ClientHello has been generated, i.e., after
+    /// `SSL_do_handshake()` has been called at least once. This is intended
+    /// for REALITY protocol session injection where the caller needs to
+    /// perform an independent ECDH with the server's static public key.
+    ///
+    /// Returns `None` if no X25519 key share is present (e.g., if TLS 1.2
+    /// was negotiated or a different group was used).
+    #[corresponds(SSL_get_x25519_private_key)]
+    pub fn get_x25519_private_key(&self) -> Option<[u8; 32]> {
+        let mut out = [0u8; 32];
+        let mut out_len: usize = 0;
+        let ret = unsafe {
+            ffi::SSL_get_x25519_private_key(self.as_ptr(), out.as_mut_ptr(), &mut out_len)
+        };
+        if ret == 1 && out_len == 32 {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    /// Patches the session_id in the transcript buffer in-place.
+    ///
+    /// This is used for REALITY protocol session injection. It overwrites
+    /// the 32-byte session_id field (at handshake offset 39) in the transcript
+    /// buffer and updates `hs->session_id` for ServerHello echo validation.
+    ///
+    /// `sid` must be exactly 32 bytes.
+    #[corresponds(SSL_set_client_hello_session_id)]
+    pub fn set_client_hello_session_id(&mut self, sid: &[u8; 32]) -> Result<(), ErrorStack> {
+        unsafe {
+            if ffi::SSL_set_client_hello_session_id(self.as_ptr(), sid.as_ptr(), sid.len()) == 1 {
+                Ok(())
+            } else {
+                Err(ErrorStack::get())
+            }
+        }
+    }
+
     /// Derives keying material for application use in accordance to RFC 5705.
     #[corresponds(SSL_export_keying_material)]
     pub fn export_keying_material(
@@ -3989,6 +4030,8 @@ pub struct SslStream<S> {
     ssl: ManuallyDrop<Ssl>,
     method: ManuallyDrop<BioMethod>,
     _p: PhantomData<S>,
+    /// Captured ClientHello bytes during split handshake (REALITY support).
+    captured_client_hello: Option<Vec<u8>>,
 }
 
 impl<S> Drop for SslStream<S> {
@@ -4030,6 +4073,7 @@ impl<S: Read + Write> SslStream<S> {
             ssl: ManuallyDrop::new(ssl),
             method: ManuallyDrop::new(method),
             _p: PhantomData,
+            captured_client_hello: None,
         })
     }
 
@@ -4189,9 +4233,179 @@ impl<S: Read + Write> SslStream<S> {
             Err(self.make_error(ret))
         }
     }
+
+    // ─── Split handshake for REALITY protocol ────────────────────────
+
+    /// Generates a ClientHello into an internal buffer without sending it
+    /// to the network.
+    ///
+    /// This works by temporarily replacing the write BIO with a memory BIO,
+    /// calling `SSL_do_handshake()` to trigger ClientHello generation, then
+    /// reading the result from the memory BIO and restoring the original.
+    ///
+    /// After this call:
+    /// - `ssl().get_x25519_private_key()` returns the ephemeral private key
+    /// - `ssl().client_random()` returns the client random
+    /// - `pending_client_hello()` returns the raw TLS record bytes
+    ///
+    /// Modify the bytes via `set_client_hello()`, then call
+    /// `finish_connect()` to send the modified ClientHello and complete
+    /// the handshake.
+    pub fn build_client_hello(&mut self) -> Result<(), ErrorStack> {
+        unsafe {
+            let ssl_ptr = self.ssl.as_ptr();
+
+            // 1. Set connect state so SSL_do_handshake acts as client
+            ffi::SSL_set_connect_state(ssl_ptr);
+
+            // 2. Save original wbio and bump its refcount.
+            //    SSL_set0_wbio will release the current wbio, so we need
+            //    to protect it with an extra reference.
+            let orig_wbio = ffi::SSL_get_wbio(ssl_ptr);
+            assert!(!orig_wbio.is_null(), "wbio must be set before build_client_hello");
+            ffi::BIO_up_ref(orig_wbio);
+
+            // 3. Create memory BIO for capturing the ClientHello
+            let mem_bio = ffi::BIO_new(ffi::BIO_s_mem());
+            if mem_bio.is_null() {
+                ffi::BIO_free(orig_wbio); // drop the extra ref from step 2
+                return Err(ErrorStack::get());
+            }
+
+            // 4. Replace only wbio with mem_bio — SSL_set0_wbio takes
+            //    ownership of mem_bio and releases the old wbio (our
+            //    up_ref from step 2 keeps orig_wbio alive).
+            ffi::SSL_set0_wbio(ssl_ptr, mem_bio);
+
+            // 5. SSL_do_handshake generates the ClientHello → written to mem_bio.
+            //    Expected result: WANT_READ (waiting for ServerHello).
+            let ret = ffi::SSL_do_handshake(ssl_ptr);
+            let err_code = ffi::SSL_get_error(ssl_ptr, ret);
+
+            if ret > 0 {
+                // Handshake completed in one shot? Shouldn't happen for client.
+                ffi::SSL_set0_wbio(ssl_ptr, orig_wbio);
+                return Err(ErrorStack::get());
+            }
+
+            if err_code != ffi::SSL_ERROR_WANT_READ as c_int
+                && err_code != ffi::SSL_ERROR_WANT_WRITE as c_int
+            {
+                ffi::SSL_set0_wbio(ssl_ptr, orig_wbio);
+                return Err(ErrorStack::get());
+            }
+
+            // 6. Read the ClientHello from the memory BIO
+            let current_wbio = ffi::SSL_get_wbio(ssl_ptr); // == mem_bio
+            let pending = ffi::BIO_ctrl_pending(current_wbio) as usize;
+            if pending == 0 {
+                ffi::SSL_set0_wbio(ssl_ptr, orig_wbio);
+                return Err(ErrorStack::get());
+            }
+
+            let mut client_hello = vec![0u8; pending];
+            let read_len = ffi::BIO_read(
+                current_wbio,
+                client_hello.as_mut_ptr().cast(),
+                pending as c_int,
+            );
+            if read_len <= 0 {
+                ffi::SSL_set0_wbio(ssl_ptr, orig_wbio);
+                return Err(ErrorStack::get());
+            }
+            client_hello.truncate(read_len as usize);
+
+            // 7. Restore original wbio — SSL_set0_wbio releases mem_bio
+            //    and takes ownership of orig_wbio (consuming step 2's up_ref).
+            ffi::SSL_set0_wbio(ssl_ptr, orig_wbio);
+
+            // 8. Store captured bytes
+            self.captured_client_hello = Some(client_hello);
+
+            Ok(())
+        }
+    }
+
+    /// Sends the (possibly modified) ClientHello and completes the
+    /// handshake.
+    ///
+    /// This writes the captured ClientHello bytes to the real network BIO,
+    /// then resumes `SSL_do_handshake()` to complete the TLS handshake.
+    pub fn finish_connect(&mut self) -> Result<(), Error> {
+        // 1. If there is a pending ClientHello, write it to the real wbio
+        if let Some(ref client_hello) = self.captured_client_hello {
+            unsafe {
+                let wbio = ffi::SSL_get_wbio(self.ssl.as_ptr());
+                assert!(!wbio.is_null());
+
+                let written = ffi::BIO_write(
+                    wbio,
+                    client_hello.as_ptr().cast(),
+                    client_hello.len() as c_int,
+                );
+
+                if written <= 0 {
+                    let should_retry = ffi::BIO_should_retry(wbio) != 0;
+                    if should_retry {
+                        // BIO_write failed with WouldBlock. Keep data for retry.
+                        return Err(Error {
+                            code: ErrorCode::WANT_WRITE,
+                            cause: self.get_bio_error().map(InnerError::Io),
+                        });
+                    } else {
+                        // Fatal I/O error or connection closed.
+                        return Err(Error {
+                            code: ErrorCode::SYSCALL,
+                            cause: self.get_bio_error().map(InnerError::Io),
+                        });
+                    }
+                }
+
+                let written = written as usize;
+                if written < client_hello.len() {
+                    // Partial write: retain the unsent tail
+                    let remaining = client_hello[written..].to_vec();
+                    self.captured_client_hello = Some(remaining);
+                    return Err(Error {
+                        code: ErrorCode::WANT_WRITE,
+                        cause: None,
+                    });
+                }
+            }
+            // Fully written — clear the buffer
+            self.captured_client_hello = None;
+        }
+
+        // 2. Continue the handshake (read ServerHello, etc.)
+        self.do_handshake()
+    }
 }
 
 impl<S> SslStream<S> {
+    /// Returns the captured ClientHello bytes from `build_client_hello()`.
+    ///
+    /// Returns `None` if `build_client_hello()` has not been called or if
+    /// the bytes have already been consumed by `finish_connect()`.
+    pub fn pending_client_hello(&self) -> Option<&[u8]> {
+        self.captured_client_hello.as_deref()
+    }
+
+    /// Replaces the pending ClientHello with modified bytes.
+    ///
+    /// The length **must** match the original ClientHello exactly. This is
+    /// a safety requirement: BoringSSL's internal state tracks the expected
+    /// record length, and a mismatch would corrupt the handshake.
+    pub fn set_client_hello(&mut self, data: &[u8]) -> Result<(), ErrorStack> {
+        match self.captured_client_hello {
+            Some(ref existing) if existing.len() == data.len() => {
+                self.captured_client_hello = Some(data.to_vec());
+                Ok(())
+            }
+            Some(_) => Err(ErrorStack::get()), // length mismatch
+            None => Err(ErrorStack::get()),    // nothing captured
+        }
+    }
+
     fn make_error(&mut self, ret: c_int) -> Error {
         self.check_panic();
 

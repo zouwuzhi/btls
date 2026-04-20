@@ -153,6 +153,71 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
     pub async fn do_handshake(mut self: Pin<&mut Self>) -> Result<(), ssl::Error> {
         future::poll_fn(|cx| self.as_mut().poll_do_handshake(cx)).await
     }
+
+    // ─── Split handshake for REALITY protocol ────────────────────────
+
+    /// Generates a ClientHello into an internal buffer without sending it.
+    ///
+    /// The memory BIO swap technique means no real network I/O occurs.
+    /// However, `SSL_do_handshake` may attempt to read through rbio
+    /// (returning WouldBlock), so we set the async context first.
+    ///
+    /// After this call, use `pending_client_hello()` to read the raw bytes,
+    /// modify them (e.g., inject REALITY session_id), then call
+    /// `finish_connect()`.
+    #[inline]
+    pub fn poll_build_client_hello(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ErrorStack>> {
+        self.with_context(cx, |s| {
+            match s.build_client_hello() {
+                Ok(()) => Poll::Ready(Ok(())),
+                Err(e) => Poll::Ready(Err(e)),
+            }
+        })
+    }
+
+    /// Async convenience wrapper for [`poll_build_client_hello`](Self::poll_build_client_hello).
+    #[inline]
+    pub async fn build_client_hello(mut self: Pin<&mut Self>) -> Result<(), ErrorStack> {
+        future::poll_fn(|cx| self.as_mut().poll_build_client_hello(cx)).await
+    }
+
+    /// Like [`SslStream::finish_connect`](ssl::SslStream::finish_connect).
+    ///
+    /// Sends the (possibly modified) ClientHello and completes the handshake.
+    #[inline]
+    pub fn poll_finish_connect(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ssl::Error>> {
+        self.with_context(cx, |s| cvt_ossl(s.finish_connect()))
+    }
+
+    /// Async convenience wrapper for [`poll_finish_connect`](Self::poll_finish_connect).
+    #[inline]
+    pub async fn finish_connect(mut self: Pin<&mut Self>) -> Result<(), ssl::Error> {
+        future::poll_fn(|cx| self.as_mut().poll_finish_connect(cx)).await
+    }
+}
+
+impl<S> SslStream<S> {
+    /// Returns the captured ClientHello bytes, if available.
+    ///
+    /// This delegates to the inner [`SslStream::pending_client_hello`](ssl::SslStream::pending_client_hello).
+    #[inline]
+    pub fn pending_client_hello(&self) -> Option<&[u8]> {
+        self.0.pending_client_hello()
+    }
+
+    /// Replaces the pending ClientHello with modified bytes.
+    ///
+    /// The length must match the original exactly.
+    #[inline]
+    pub fn set_client_hello(&mut self, data: &[u8]) -> Result<(), ErrorStack> {
+        self.0.set_client_hello(data)
+    }
 }
 
 impl<S> SslStream<S> {
@@ -160,6 +225,12 @@ impl<S> SslStream<S> {
     /// Returns a shared reference to the `Ssl` object associated with this stream.
     pub fn ssl(&self) -> &SslRef {
         self.0.ssl()
+    }
+
+    #[inline]
+    /// Returns a mutable reference to the `Ssl` object associated with this stream.
+    pub fn ssl_mut(&mut self) -> &mut SslRef {
+        self.0.ssl_mut()
     }
 
     #[inline]
