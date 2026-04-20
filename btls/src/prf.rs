@@ -5,10 +5,10 @@
 //! # Example
 //!
 //! ```
-//! use boring::hash::MessageDigest;
+//! use btls::hash::MessageDigest;
 //!
 //! let mut out = [0u8; 48];
-//! boring::prf::tls1_prf(
+//! btls::prf::tls1_prf(
 //!     MessageDigest::sha256(),
 //!     &mut out,
 //!     b"secret",

@@ -39,7 +39,7 @@
 //! # Example
 //!
 //! ```
-//! use boring::aead::{AeadCtx, Algorithm};
+//! use btls::aead::{AeadCtx, Algorithm};
 //!
 //! let algorithm = Algorithm::aes_128_gcm();
 //! let ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
@@ -252,7 +252,7 @@ impl AeadCtxRef {
     /// # Examples
     ///
     /// ```
-    /// use boring::aead::{AeadCtx, Algorithm};
+    /// use btls::aead::{AeadCtx, Algorithm};
     ///
     /// let algorithm = Algorithm::chacha20_poly1305();
     /// let ctx = AeadCtx::new(&algorithm, &[7u8; 32], algorithm.max_tag_len()).unwrap();
