@@ -5,8 +5,8 @@ use std::str::FromStr;
 use crate::dh::Dh;
 use crate::error::ErrorStack;
 use crate::ssl::{
-    HandshakeError, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod, SslMode,
-    SslOptions, SslRef, SslSignatureAlgorithm, SslStream, SslVerifyMode,
+    HandshakeError, KeyShare, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod,
+    SslMode, SslOptions, SslRef, SslSignatureAlgorithm, SslStream, SslVerifyMode,
 };
 use crate::version;
 use std::net::IpAddr;
@@ -45,9 +45,12 @@ const CHROME_FINGERPRINT_PROFILE: ResolvedFingerprintProfile = ResolvedFingerpri
                   ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
                   ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305",
     curves_list: "X25519:P-256:P-384",
+    grease_enabled: true,
+    enable_ech_grease: true,
     permute_extensions: true,
     preserve_tls13_cipher_list: true,
     verify_algorithm_prefs: &DEFAULT_VERIFY_ALGORITHM_PREFS,
+    key_shares: &[],
     default_alpn_protocols: &DEFAULT_HTTP_ALPN_PROTOCOLS,
 };
 
@@ -59,9 +62,12 @@ const SAFARI_FINGERPRINT_PROFILE: ResolvedFingerprintProfile = ResolvedFingerpri
                   ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:\
                   ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305",
     curves_list: "X25519:P-256:P-384:P-521",
+    grease_enabled: true,
+    enable_ech_grease: false,
     permute_extensions: false,
     preserve_tls13_cipher_list: true,
     verify_algorithm_prefs: &DEFAULT_VERIFY_ALGORITHM_PREFS,
+    key_shares: &[],
     default_alpn_protocols: &DEFAULT_HTTP_ALPN_PROTOCOLS,
 };
 
@@ -110,9 +116,12 @@ pub struct ResolvedFingerprintProfile {
     name: &'static str,
     cipher_list: &'static str,
     curves_list: &'static str,
+    grease_enabled: bool,
+    enable_ech_grease: bool,
     permute_extensions: bool,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: &'static [SslSignatureAlgorithm],
+    key_shares: &'static [KeyShare],
     default_alpn_protocols: &'static [&'static [u8]],
 }
 
@@ -133,6 +142,16 @@ impl ResolvedFingerprintProfile {
     }
 
     #[must_use]
+    pub fn grease_enabled(self) -> bool {
+        self.grease_enabled
+    }
+
+    #[must_use]
+    pub fn enable_ech_grease(self) -> bool {
+        self.enable_ech_grease
+    }
+
+    #[must_use]
     pub fn permute_extensions(self) -> bool {
         self.permute_extensions
     }
@@ -145,6 +164,11 @@ impl ResolvedFingerprintProfile {
     #[must_use]
     pub fn verify_algorithm_prefs(self) -> &'static [SslSignatureAlgorithm] {
         self.verify_algorithm_prefs
+    }
+
+    #[must_use]
+    pub fn key_shares(self) -> &'static [KeyShare] {
+        self.key_shares
     }
 
     #[must_use]
@@ -163,9 +187,12 @@ pub struct TlsClientProfileSpec {
     name: Option<String>,
     cipher_list: String,
     curves_list: String,
+    grease_enabled: bool,
+    enable_ech_grease: bool,
     permute_extensions: bool,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: Vec<SslSignatureAlgorithm>,
+    key_shares: Vec<KeyShare>,
     default_alpn_protocols: Vec<Vec<u8>>,
 }
 
@@ -183,9 +210,12 @@ impl TlsClientProfileSpec {
             name: None,
             cipher_list: cipher_list.into(),
             curves_list: curves_list.into(),
+            grease_enabled: false,
+            enable_ech_grease: false,
             permute_extensions: false,
             preserve_tls13_cipher_list: false,
             verify_algorithm_prefs: verify_algorithm_prefs.into_iter().collect(),
+            key_shares: Vec::new(),
             default_alpn_protocols: Vec::new(),
         }
     }
@@ -193,6 +223,18 @@ impl TlsClientProfileSpec {
     /// Sets a stable profile name for diagnostics.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Sets whether RFC 8701 GREASE values should be enabled.
+    pub fn enable_grease(mut self, enabled: bool) -> Self {
+        self.grease_enabled = enabled;
+        self
+    }
+
+    /// Sets whether the TLS connection should send GREASE ECH.
+    pub fn enable_ech_grease(mut self, enabled: bool) -> Self {
+        self.enable_ech_grease = enabled;
         self
     }
 
@@ -205,6 +247,15 @@ impl TlsClientProfileSpec {
     /// Sets whether the configured TLS 1.3 cipher list order is preserved.
     pub fn preserve_tls13_cipher_list(mut self, enabled: bool) -> Self {
         self.preserve_tls13_cipher_list = enabled;
+        self
+    }
+
+    /// Sets the TLS 1.3 client key shares to advertise.
+    pub fn client_key_shares<I>(mut self, key_shares: I) -> Self
+    where
+        I: IntoIterator<Item = KeyShare>,
+    {
+        self.key_shares = key_shares.into_iter().collect();
         self
     }
 
@@ -239,6 +290,18 @@ impl TlsClientProfileSpec {
         &self.curves_list
     }
 
+    /// Returns whether RFC 8701 GREASE values should be enabled.
+    #[must_use]
+    pub fn grease_enabled(&self) -> bool {
+        self.grease_enabled
+    }
+
+    /// Returns whether the TLS connection should send GREASE ECH.
+    #[must_use]
+    pub fn ech_grease_enabled(&self) -> bool {
+        self.enable_ech_grease
+    }
+
     /// Returns whether ClientHello extensions should be permuted.
     #[must_use]
     pub fn permute_extensions_enabled(&self) -> bool {
@@ -255,6 +318,12 @@ impl TlsClientProfileSpec {
     #[must_use]
     pub fn verify_algorithm_prefs(&self) -> &[SslSignatureAlgorithm] {
         &self.verify_algorithm_prefs
+    }
+
+    /// Returns the TLS 1.3 client key shares to advertise.
+    #[must_use]
+    pub fn key_shares(&self) -> &[KeyShare] {
+        &self.key_shares
     }
 
     /// Returns default ALPN protocols used when [`TlsClientOptions`] has no ALPN override.
@@ -344,6 +413,17 @@ impl TlsClientOptions {
         self.session_tickets
     }
 
+    /// Applies per-connection TLS options to an [`Ssl`] before the handshake starts.
+    pub fn apply_ssl_options(&self, ssl: &mut Ssl) -> Result<(), ErrorStack> {
+        if let Some(spec) = self.fingerprint_spec_ref() {
+            apply_ssl_fingerprint_settings(ssl, spec.ech_grease_enabled(), spec.key_shares())?;
+        } else if let Some(profile) = self.resolved_fingerprint_profile() {
+            apply_ssl_fingerprint_settings(ssl, profile.enable_ech_grease(), profile.key_shares())?;
+        }
+
+        Ok(())
+    }
+
     fn encoded_alpn_protocols(&self) -> Result<Option<Vec<u8>>, ErrorStack> {
         if let Some(protocols) = self.alpn_protocols.as_ref() {
             return encode_alpn_protocols(protocols.iter().map(Vec::as_slice)).map(Some);
@@ -377,6 +457,18 @@ where
         encoded.extend_from_slice(protocol);
     }
     Ok(encoded)
+}
+
+fn apply_ssl_fingerprint_settings(
+    ssl: &mut Ssl,
+    enable_ech_grease: bool,
+    key_shares: &[KeyShare],
+) -> Result<(), ErrorStack> {
+    ssl.set_enable_ech_grease(enable_ech_grease);
+    if !key_shares.is_empty() {
+        ssl.set_client_key_shares(key_shares)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::inconsistent_digit_grouping)]
@@ -506,6 +598,7 @@ impl SslConnectorBuilder {
             self.apply_fingerprint_settings(
                 spec.cipher_list(),
                 spec.curves_list(),
+                spec.grease_enabled(),
                 spec.permute_extensions_enabled(),
                 spec.preserve_tls13_cipher_list_enabled(),
                 spec.verify_algorithm_prefs(),
@@ -514,6 +607,7 @@ impl SslConnectorBuilder {
             self.apply_fingerprint_settings(
                 profile.cipher_list(),
                 profile.curves_list(),
+                profile.grease_enabled(),
                 profile.permute_extensions(),
                 profile.preserve_tls13_cipher_list(),
                 profile.verify_algorithm_prefs(),
@@ -537,6 +631,7 @@ impl SslConnectorBuilder {
         &mut self,
         cipher_list: &str,
         curves_list: &str,
+        grease_enabled: bool,
         permute_extensions: bool,
         preserve_tls13_cipher_list: bool,
         verify_algorithm_prefs: &[SslSignatureAlgorithm],
@@ -545,6 +640,7 @@ impl SslConnectorBuilder {
         self.set_preserve_tls13_cipher_list(preserve_tls13_cipher_list);
         self.set_cipher_list(cipher_list)?;
         self.set_curves_list(curves_list)?;
+        self.set_grease_enabled(grease_enabled);
         self.set_permute_extensions(permute_extensions);
         self.set_verify_algorithm_prefs(verify_algorithm_prefs)?;
         Ok(())
@@ -745,6 +841,35 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_profiles_include_grease_defaults() {
+        let chrome = FingerprintProfile::Chrome.resolve();
+        assert!(chrome.grease_enabled());
+        assert!(chrome.enable_ech_grease());
+        assert!(chrome.key_shares().is_empty());
+
+        let safari = FingerprintProfile::Safari.resolve();
+        assert!(safari.grease_enabled());
+        assert!(!safari.enable_ech_grease());
+        assert!(safari.key_shares().is_empty());
+    }
+
+    #[test]
+    fn raw_profile_exposes_grease_and_key_share_settings() {
+        let spec = TlsClientProfileSpec::new(
+            CHROME_FINGERPRINT_PROFILE.cipher_list(),
+            CHROME_FINGERPRINT_PROFILE.curves_list(),
+            DEFAULT_VERIFY_ALGORITHM_PREFS,
+        )
+        .enable_grease(true)
+        .enable_ech_grease(true)
+        .client_key_shares([KeyShare::X25519, KeyShare::P256]);
+
+        assert!(spec.grease_enabled());
+        assert!(spec.ech_grease_enabled());
+        assert_eq!(spec.key_shares(), &[KeyShare::X25519, KeyShare::P256]);
+    }
+
+    #[test]
     fn apply_client_options_toggles_session_tickets() {
         let mut builder = SslConnector::bare_builder(SslMethod::tls()).unwrap();
         builder.set_options(SslOptions::NO_TICKET);
@@ -820,6 +945,31 @@ mod tests {
                 .name_ref(),
             Some("chrome_131")
         );
+    }
+
+    #[test]
+    fn apply_ssl_options_accepts_raw_ssl_level_settings() {
+        let options = TlsClientOptions::new().fingerprint_spec(
+            TlsClientProfileSpec::new(
+                CHROME_FINGERPRINT_PROFILE.cipher_list(),
+                CHROME_FINGERPRINT_PROFILE.curves_list(),
+                DEFAULT_VERIFY_ALGORITHM_PREFS,
+            )
+            .enable_ech_grease(true)
+            .client_key_shares([KeyShare::X25519, KeyShare::P256]),
+        );
+
+        let connector = SslConnector::bare_builder(SslMethod::tls())
+            .unwrap()
+            .build();
+        let mut ssl = connector
+            .configure()
+            .unwrap()
+            .verify_hostname(false)
+            .into_ssl("localhost")
+            .unwrap();
+
+        options.apply_ssl_options(&mut ssl).unwrap();
     }
 }
 
