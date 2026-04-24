@@ -5,8 +5,9 @@ use std::str::FromStr;
 use crate::dh::Dh;
 use crate::error::ErrorStack;
 use crate::ssl::{
-    HandshakeError, KeyShare, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod,
-    SslMode, SslOptions, SslRef, SslSignatureAlgorithm, SslStream, SslVerifyMode, SslVersion,
+    ExtensionType, HandshakeError, KeyShare, Ssl, SslContext, SslContextBuilder, SslContextRef,
+    SslMethod, SslMode, SslOptions, SslRef, SslSignatureAlgorithm, SslStream, SslVerifyMode,
+    SslVersion,
 };
 use crate::version;
 use std::net::IpAddr;
@@ -51,6 +52,7 @@ const CHROME_FINGERPRINT_PROFILE: ResolvedFingerprintProfile = ResolvedFingerpri
     enable_ech_grease: true,
     enable_ocsp_stapling: true,
     enable_signed_cert_timestamps: true,
+    extension_permutation: &[],
     permute_extensions: true,
     preserve_tls13_cipher_list: true,
     verify_algorithm_prefs: &DEFAULT_VERIFY_ALGORITHM_PREFS,
@@ -74,6 +76,7 @@ const SAFARI_FINGERPRINT_PROFILE: ResolvedFingerprintProfile = ResolvedFingerpri
     enable_ech_grease: false,
     enable_ocsp_stapling: true,
     enable_signed_cert_timestamps: true,
+    extension_permutation: &[],
     permute_extensions: false,
     preserve_tls13_cipher_list: true,
     verify_algorithm_prefs: &DEFAULT_VERIFY_ALGORITHM_PREFS,
@@ -134,6 +137,7 @@ pub struct ResolvedFingerprintProfile {
     enable_ech_grease: bool,
     enable_ocsp_stapling: bool,
     enable_signed_cert_timestamps: bool,
+    extension_permutation: &'static [ExtensionType],
     permute_extensions: bool,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: &'static [SslSignatureAlgorithm],
@@ -190,6 +194,11 @@ impl ResolvedFingerprintProfile {
     }
 
     #[must_use]
+    pub fn extension_permutation(self) -> &'static [ExtensionType] {
+        self.extension_permutation
+    }
+
+    #[must_use]
     pub fn permute_extensions(self) -> bool {
         self.permute_extensions
     }
@@ -241,6 +250,7 @@ pub struct TlsClientProfileSpec {
     enable_ech_grease: bool,
     enable_ocsp_stapling: bool,
     enable_signed_cert_timestamps: bool,
+    extension_permutation: Vec<ExtensionType>,
     permute_extensions: bool,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: Vec<SslSignatureAlgorithm>,
@@ -270,6 +280,7 @@ impl TlsClientProfileSpec {
             enable_ech_grease: false,
             enable_ocsp_stapling: false,
             enable_signed_cert_timestamps: false,
+            extension_permutation: Vec::new(),
             permute_extensions: false,
             preserve_tls13_cipher_list: false,
             verify_algorithm_prefs: verify_algorithm_prefs.into_iter().collect(),
@@ -319,6 +330,15 @@ impl TlsClientProfileSpec {
     /// Sets whether the TLS connection should send GREASE ECH.
     pub fn enable_ech_grease(mut self, enabled: bool) -> Self {
         self.enable_ech_grease = enabled;
+        self
+    }
+
+    /// Sets a concrete ClientHello extension order.
+    pub fn extension_permutation<I>(mut self, extension_permutation: I) -> Self
+    where
+        I: IntoIterator<Item = ExtensionType>,
+    {
+        self.extension_permutation = extension_permutation.into_iter().collect();
         self
     }
 
@@ -427,6 +447,12 @@ impl TlsClientProfileSpec {
     #[must_use]
     pub fn signed_cert_timestamps_enabled(&self) -> bool {
         self.enable_signed_cert_timestamps
+    }
+
+    /// Returns the configured ClientHello extension order.
+    #[must_use]
+    pub fn extension_permutation_ref(&self) -> &[ExtensionType] {
+        &self.extension_permutation
     }
 
     /// Returns whether ClientHello extensions should be permuted.
@@ -637,6 +663,7 @@ struct FingerprintSettings<'a> {
     curves_list: &'a str,
     grease_enabled: bool,
     permute_extensions: bool,
+    extension_permutation: &'a [ExtensionType],
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: &'a [SslSignatureAlgorithm],
     enable_ocsp_stapling: bool,
@@ -652,6 +679,7 @@ impl<'a> FingerprintSettings<'a> {
             curves_list: spec.curves_list(),
             grease_enabled: spec.grease_enabled(),
             permute_extensions: spec.permute_extensions_enabled(),
+            extension_permutation: spec.extension_permutation_ref(),
             preserve_tls13_cipher_list: spec.preserve_tls13_cipher_list_enabled(),
             verify_algorithm_prefs: spec.verify_algorithm_prefs(),
             enable_ocsp_stapling: spec.ocsp_stapling_enabled(),
@@ -667,6 +695,7 @@ impl<'a> FingerprintSettings<'a> {
             curves_list: profile.curves_list(),
             grease_enabled: profile.grease_enabled(),
             permute_extensions: profile.permute_extensions(),
+            extension_permutation: profile.extension_permutation(),
             preserve_tls13_cipher_list: profile.preserve_tls13_cipher_list(),
             verify_algorithm_prefs: profile.verify_algorithm_prefs(),
             enable_ocsp_stapling: profile.enable_ocsp_stapling(),
@@ -829,6 +858,9 @@ impl SslConnectorBuilder {
         self.set_curves_list(settings.curves_list)?;
         self.set_grease_enabled(settings.grease_enabled);
         self.set_permute_extensions(settings.permute_extensions);
+        if !settings.extension_permutation.is_empty() {
+            self.set_extension_permutation(settings.extension_permutation)?;
+        }
         self.set_verify_algorithm_prefs(settings.verify_algorithm_prefs)?;
         if settings.enable_ocsp_stapling {
             self.enable_ocsp_stapling();
@@ -1042,6 +1074,7 @@ mod tests {
         assert!(chrome.enable_ech_grease());
         assert!(chrome.enable_ocsp_stapling());
         assert!(chrome.enable_signed_cert_timestamps());
+        assert!(chrome.extension_permutation().is_empty());
         assert!(chrome.key_shares().is_empty());
         assert_eq!(chrome.default_alps_protocols(), &[b"h2".as_slice()]);
 
@@ -1052,6 +1085,7 @@ mod tests {
         assert!(!safari.enable_ech_grease());
         assert!(safari.enable_ocsp_stapling());
         assert!(safari.enable_signed_cert_timestamps());
+        assert!(safari.extension_permutation().is_empty());
         assert!(safari.key_shares().is_empty());
         assert!(safari.default_alps_protocols().is_empty());
     }
@@ -1069,6 +1103,7 @@ mod tests {
         .enable_ech_grease(true)
         .enable_ocsp_stapling(true)
         .enable_signed_cert_timestamps(true)
+        .extension_permutation([ExtensionType::SERVER_NAME, ExtensionType::SUPPORTED_GROUPS])
         .client_key_shares([KeyShare::X25519, KeyShare::P256])
         .default_alps_protocols([b"h2".as_slice()])
         .alps_use_new_codepoint(true);
@@ -1079,6 +1114,10 @@ mod tests {
         assert!(spec.ech_grease_enabled());
         assert!(spec.ocsp_stapling_enabled());
         assert!(spec.signed_cert_timestamps_enabled());
+        assert_eq!(
+            spec.extension_permutation_ref(),
+            &[ExtensionType::SERVER_NAME, ExtensionType::SUPPORTED_GROUPS]
+        );
         assert_eq!(spec.key_shares(), &[KeyShare::X25519, KeyShare::P256]);
         assert_eq!(spec.default_alps_protocols_ref(), &[b"h2".to_vec()]);
         assert!(spec.alps_use_new_codepoint_enabled());
@@ -1141,6 +1180,10 @@ mod tests {
                         .max_tls_version(Some(SslVersion::TLS1_3))
                         .enable_ocsp_stapling(true)
                         .enable_signed_cert_timestamps(true)
+                        .extension_permutation([
+                            ExtensionType::SERVER_NAME,
+                            ExtensionType::SUPPORTED_GROUPS,
+                        ])
                         .permute_extensions(true)
                         .preserve_tls13_cipher_list(true),
                     )
