@@ -52,8 +52,13 @@ const CHROME_FINGERPRINT_PROFILE: ResolvedFingerprintProfile = ResolvedFingerpri
     enable_ech_grease: true,
     enable_ocsp_stapling: true,
     enable_signed_cert_timestamps: true,
+    session_tickets: true,
     extension_permutation: &[],
     permute_extensions: true,
+    psk_dhe_ke: true,
+    delegated_credentials: None,
+    record_size_limit: None,
+    aes_hw_override: None,
     preserve_tls13_cipher_list: true,
     verify_algorithm_prefs: &DEFAULT_VERIFY_ALGORITHM_PREFS,
     key_shares: &[],
@@ -76,8 +81,13 @@ const SAFARI_FINGERPRINT_PROFILE: ResolvedFingerprintProfile = ResolvedFingerpri
     enable_ech_grease: false,
     enable_ocsp_stapling: true,
     enable_signed_cert_timestamps: true,
+    session_tickets: false,
     extension_permutation: &[],
     permute_extensions: false,
+    psk_dhe_ke: true,
+    delegated_credentials: None,
+    record_size_limit: None,
+    aes_hw_override: None,
     preserve_tls13_cipher_list: true,
     verify_algorithm_prefs: &DEFAULT_VERIFY_ALGORITHM_PREFS,
     key_shares: &[],
@@ -137,8 +147,13 @@ pub struct ResolvedFingerprintProfile {
     enable_ech_grease: bool,
     enable_ocsp_stapling: bool,
     enable_signed_cert_timestamps: bool,
+    session_tickets: bool,
     extension_permutation: &'static [ExtensionType],
     permute_extensions: bool,
+    psk_dhe_ke: bool,
+    delegated_credentials: Option<&'static str>,
+    record_size_limit: Option<u16>,
+    aes_hw_override: Option<bool>,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: &'static [SslSignatureAlgorithm],
     key_shares: &'static [KeyShare],
@@ -194,6 +209,11 @@ impl ResolvedFingerprintProfile {
     }
 
     #[must_use]
+    pub fn session_tickets(self) -> bool {
+        self.session_tickets
+    }
+
+    #[must_use]
     pub fn extension_permutation(self) -> &'static [ExtensionType] {
         self.extension_permutation
     }
@@ -201,6 +221,26 @@ impl ResolvedFingerprintProfile {
     #[must_use]
     pub fn permute_extensions(self) -> bool {
         self.permute_extensions
+    }
+
+    #[must_use]
+    pub fn psk_dhe_ke(self) -> bool {
+        self.psk_dhe_ke
+    }
+
+    #[must_use]
+    pub fn delegated_credentials(self) -> Option<&'static str> {
+        self.delegated_credentials
+    }
+
+    #[must_use]
+    pub fn record_size_limit(self) -> Option<u16> {
+        self.record_size_limit
+    }
+
+    #[must_use]
+    pub fn aes_hw_override(self) -> Option<bool> {
+        self.aes_hw_override
     }
 
     #[must_use]
@@ -250,8 +290,13 @@ pub struct TlsClientProfileSpec {
     enable_ech_grease: bool,
     enable_ocsp_stapling: bool,
     enable_signed_cert_timestamps: bool,
+    session_tickets: bool,
     extension_permutation: Vec<ExtensionType>,
     permute_extensions: bool,
+    psk_dhe_ke: bool,
+    delegated_credentials: Option<String>,
+    record_size_limit: Option<u16>,
+    aes_hw_override: Option<bool>,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: Vec<SslSignatureAlgorithm>,
     key_shares: Vec<KeyShare>,
@@ -280,8 +325,13 @@ impl TlsClientProfileSpec {
             enable_ech_grease: false,
             enable_ocsp_stapling: false,
             enable_signed_cert_timestamps: false,
+            session_tickets: true,
             extension_permutation: Vec::new(),
             permute_extensions: false,
+            psk_dhe_ke: true,
+            delegated_credentials: None,
+            record_size_limit: None,
+            aes_hw_override: None,
             preserve_tls13_cipher_list: false,
             verify_algorithm_prefs: verify_algorithm_prefs.into_iter().collect(),
             key_shares: Vec::new(),
@@ -333,6 +383,12 @@ impl TlsClientProfileSpec {
         self
     }
 
+    /// Sets whether TLS session tickets should be enabled for this profile.
+    pub fn session_tickets(mut self, enabled: bool) -> Self {
+        self.session_tickets = enabled;
+        self
+    }
+
     /// Sets a concrete ClientHello extension order.
     pub fn extension_permutation<I>(mut self, extension_permutation: I) -> Self
     where
@@ -345,6 +401,30 @@ impl TlsClientProfileSpec {
     /// Sets whether ClientHello extensions should be permuted.
     pub fn permute_extensions(mut self, enabled: bool) -> Self {
         self.permute_extensions = enabled;
+        self
+    }
+
+    /// Sets whether PSK DHE key exchange modes should be enabled.
+    pub fn psk_dhe_ke(mut self, enabled: bool) -> Self {
+        self.psk_dhe_ke = enabled;
+        self
+    }
+
+    /// Sets delegated credential signature algorithms.
+    pub fn delegated_credentials(mut self, sigalgs: impl Into<String>) -> Self {
+        self.delegated_credentials = Some(sigalgs.into());
+        self
+    }
+
+    /// Sets the TLS record size limit extension value.
+    pub fn record_size_limit(mut self, limit: Option<u16>) -> Self {
+        self.record_size_limit = limit;
+        self
+    }
+
+    /// Overrides BoringSSL AES hardware capability detection.
+    pub fn aes_hw_override(mut self, enabled: Option<bool>) -> Self {
+        self.aes_hw_override = enabled;
         self
     }
 
@@ -449,6 +529,12 @@ impl TlsClientProfileSpec {
         self.enable_signed_cert_timestamps
     }
 
+    /// Returns whether TLS session tickets should be enabled for this profile.
+    #[must_use]
+    pub fn session_tickets_enabled(&self) -> bool {
+        self.session_tickets
+    }
+
     /// Returns the configured ClientHello extension order.
     #[must_use]
     pub fn extension_permutation_ref(&self) -> &[ExtensionType] {
@@ -459,6 +545,30 @@ impl TlsClientProfileSpec {
     #[must_use]
     pub fn permute_extensions_enabled(&self) -> bool {
         self.permute_extensions
+    }
+
+    /// Returns whether PSK DHE key exchange modes should be enabled.
+    #[must_use]
+    pub fn psk_dhe_ke_enabled(&self) -> bool {
+        self.psk_dhe_ke
+    }
+
+    /// Returns delegated credential signature algorithms.
+    #[must_use]
+    pub fn delegated_credentials_ref(&self) -> Option<&str> {
+        self.delegated_credentials.as_deref()
+    }
+
+    /// Returns the TLS record size limit extension value.
+    #[must_use]
+    pub fn record_size_limit_value(&self) -> Option<u16> {
+        self.record_size_limit
+    }
+
+    /// Returns the AES hardware override value.
+    #[must_use]
+    pub fn aes_hw_override_value(&self) -> Option<bool> {
+        self.aes_hw_override
     }
 
     /// Returns whether the configured TLS 1.3 cipher list order is preserved.
@@ -662,8 +772,13 @@ struct FingerprintSettings<'a> {
     max_tls_version: Option<SslVersion>,
     curves_list: &'a str,
     grease_enabled: bool,
+    session_tickets: bool,
     permute_extensions: bool,
+    psk_dhe_ke: bool,
     extension_permutation: &'a [ExtensionType],
+    delegated_credentials: Option<&'a str>,
+    record_size_limit: Option<u16>,
+    aes_hw_override: Option<bool>,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: &'a [SslSignatureAlgorithm],
     enable_ocsp_stapling: bool,
@@ -678,8 +793,13 @@ impl<'a> FingerprintSettings<'a> {
             max_tls_version: spec.max_tls_version_value(),
             curves_list: spec.curves_list(),
             grease_enabled: spec.grease_enabled(),
+            session_tickets: spec.session_tickets_enabled(),
             permute_extensions: spec.permute_extensions_enabled(),
+            psk_dhe_ke: spec.psk_dhe_ke_enabled(),
             extension_permutation: spec.extension_permutation_ref(),
+            delegated_credentials: spec.delegated_credentials_ref(),
+            record_size_limit: spec.record_size_limit_value(),
+            aes_hw_override: spec.aes_hw_override_value(),
             preserve_tls13_cipher_list: spec.preserve_tls13_cipher_list_enabled(),
             verify_algorithm_prefs: spec.verify_algorithm_prefs(),
             enable_ocsp_stapling: spec.ocsp_stapling_enabled(),
@@ -694,8 +814,13 @@ impl<'a> FingerprintSettings<'a> {
             max_tls_version: profile.max_tls_version(),
             curves_list: profile.curves_list(),
             grease_enabled: profile.grease_enabled(),
+            session_tickets: profile.session_tickets(),
             permute_extensions: profile.permute_extensions(),
+            psk_dhe_ke: profile.psk_dhe_ke(),
             extension_permutation: profile.extension_permutation(),
+            delegated_credentials: profile.delegated_credentials(),
+            record_size_limit: profile.record_size_limit(),
+            aes_hw_override: profile.aes_hw_override(),
             preserve_tls13_cipher_list: profile.preserve_tls13_cipher_list(),
             verify_algorithm_prefs: profile.verify_algorithm_prefs(),
             enable_ocsp_stapling: profile.enable_ocsp_stapling(),
@@ -827,13 +952,19 @@ pub struct SslConnectorBuilder(SslContextBuilder);
 impl SslConnectorBuilder {
     /// Applies high-level client TLS options to the connector builder.
     pub fn apply_client_options(&mut self, options: &TlsClientOptions) -> Result<(), ErrorStack> {
+        let mut profile_session_tickets = true;
+
         if let Some(spec) = options.fingerprint_spec_ref() {
-            self.apply_fingerprint_settings(FingerprintSettings::from_spec(spec))?;
+            let settings = FingerprintSettings::from_spec(spec);
+            profile_session_tickets = settings.session_tickets;
+            self.apply_fingerprint_settings(settings)?;
         } else if let Some(profile) = options.resolved_fingerprint_profile() {
-            self.apply_fingerprint_settings(FingerprintSettings::from_profile(profile))?;
+            let settings = FingerprintSettings::from_profile(profile);
+            profile_session_tickets = settings.session_tickets;
+            self.apply_fingerprint_settings(settings)?;
         }
 
-        if options.session_tickets_enabled() {
+        if options.session_tickets_enabled() && profile_session_tickets {
             self.clear_options(SslOptions::NO_TICKET);
         } else {
             self.set_options(SslOptions::NO_TICKET);
@@ -858,8 +989,25 @@ impl SslConnectorBuilder {
         self.set_curves_list(settings.curves_list)?;
         self.set_grease_enabled(settings.grease_enabled);
         self.set_permute_extensions(settings.permute_extensions);
+        if settings.psk_dhe_ke {
+            self.clear_options(SslOptions::NO_PSK_DHE_KE);
+        } else {
+            self.set_options(SslOptions::NO_PSK_DHE_KE);
+        }
         if !settings.extension_permutation.is_empty() {
             self.set_extension_permutation(settings.extension_permutation)?;
+        }
+        if let Some(delegated_credentials) = settings.delegated_credentials {
+            if !delegated_credentials.is_empty() {
+                self.set_delegated_credentials(delegated_credentials)?;
+            }
+        }
+        if let Some(record_size_limit) = settings.record_size_limit {
+            self.set_record_size_limit(record_size_limit);
+        }
+        #[cfg(not(feature = "fips"))]
+        if let Some(aes_hw_override) = settings.aes_hw_override {
+            self.set_aes_hw_override(aes_hw_override);
         }
         self.set_verify_algorithm_prefs(settings.verify_algorithm_prefs)?;
         if settings.enable_ocsp_stapling {
@@ -1074,7 +1222,12 @@ mod tests {
         assert!(chrome.enable_ech_grease());
         assert!(chrome.enable_ocsp_stapling());
         assert!(chrome.enable_signed_cert_timestamps());
+        assert!(chrome.session_tickets());
         assert!(chrome.extension_permutation().is_empty());
+        assert!(chrome.psk_dhe_ke());
+        assert_eq!(chrome.delegated_credentials(), None);
+        assert_eq!(chrome.record_size_limit(), None);
+        assert_eq!(chrome.aes_hw_override(), None);
         assert!(chrome.key_shares().is_empty());
         assert_eq!(chrome.default_alps_protocols(), &[b"h2".as_slice()]);
 
@@ -1085,7 +1238,12 @@ mod tests {
         assert!(!safari.enable_ech_grease());
         assert!(safari.enable_ocsp_stapling());
         assert!(safari.enable_signed_cert_timestamps());
+        assert!(!safari.session_tickets());
         assert!(safari.extension_permutation().is_empty());
+        assert!(safari.psk_dhe_ke());
+        assert_eq!(safari.delegated_credentials(), None);
+        assert_eq!(safari.record_size_limit(), None);
+        assert_eq!(safari.aes_hw_override(), None);
         assert!(safari.key_shares().is_empty());
         assert!(safari.default_alps_protocols().is_empty());
     }
@@ -1103,8 +1261,13 @@ mod tests {
         .enable_ech_grease(true)
         .enable_ocsp_stapling(true)
         .enable_signed_cert_timestamps(true)
+        .session_tickets(false)
         .extension_permutation([ExtensionType::SERVER_NAME, ExtensionType::SUPPORTED_GROUPS])
         .client_key_shares([KeyShare::X25519, KeyShare::P256])
+        .psk_dhe_ke(false)
+        .delegated_credentials("ecdsa_secp256r1_sha256:ecdsa_sha1")
+        .record_size_limit(Some(0x4001))
+        .aes_hw_override(Some(true))
         .default_alps_protocols([b"h2".as_slice()])
         .alps_use_new_codepoint(true);
 
@@ -1114,10 +1277,18 @@ mod tests {
         assert!(spec.ech_grease_enabled());
         assert!(spec.ocsp_stapling_enabled());
         assert!(spec.signed_cert_timestamps_enabled());
+        assert!(!spec.session_tickets_enabled());
         assert_eq!(
             spec.extension_permutation_ref(),
             &[ExtensionType::SERVER_NAME, ExtensionType::SUPPORTED_GROUPS]
         );
+        assert!(!spec.psk_dhe_ke_enabled());
+        assert_eq!(
+            spec.delegated_credentials_ref(),
+            Some("ecdsa_secp256r1_sha256:ecdsa_sha1")
+        );
+        assert_eq!(spec.record_size_limit_value(), Some(0x4001));
+        assert_eq!(spec.aes_hw_override_value(), Some(true));
         assert_eq!(spec.key_shares(), &[KeyShare::X25519, KeyShare::P256]);
         assert_eq!(spec.default_alps_protocols_ref(), &[b"h2".to_vec()]);
         assert!(spec.alps_use_new_codepoint_enabled());
@@ -1180,18 +1351,24 @@ mod tests {
                         .max_tls_version(Some(SslVersion::TLS1_3))
                         .enable_ocsp_stapling(true)
                         .enable_signed_cert_timestamps(true)
+                        .session_tickets(false)
                         .extension_permutation([
                             ExtensionType::SERVER_NAME,
                             ExtensionType::SUPPORTED_GROUPS,
                         ])
                         .permute_extensions(true)
+                        .psk_dhe_ke(false)
+                        .delegated_credentials("ecdsa_secp256r1_sha256:ecdsa_sha1")
+                        .record_size_limit(Some(0x4001))
+                        .aes_hw_override(Some(true))
                         .preserve_tls13_cipher_list(true),
                     )
-                    .session_tickets(false),
+                    .session_tickets(true),
             )
             .unwrap();
 
         assert!(builder.options().contains(SslOptions::NO_TICKET));
+        assert!(builder.options().contains(SslOptions::NO_PSK_DHE_KE));
         assert_eq!(builder.min_proto_version(), Some(SslVersion::TLS1_2));
         assert_eq!(builder.max_proto_version(), Some(SslVersion::TLS1_3));
         assert_eq!(
