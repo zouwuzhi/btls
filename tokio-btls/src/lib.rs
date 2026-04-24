@@ -9,6 +9,7 @@
 //! to it.
 
 use std::{
+    error::Error as StdError,
     fmt, future,
     io::{self, Read, Write},
     pin::Pin,
@@ -101,6 +102,171 @@ fn cvt_ossl<T>(r: Result<T, ssl::Error>) -> Poll<Result<T, ssl::Error>> {
     }
 }
 
+const TLS_RECORD_HEADER_LEN: usize = 5;
+const TLS_HANDSHAKE_HEADER_LEN: usize = 4;
+const CLIENT_HELLO_HANDSHAKE_TYPE: u8 = 0x01;
+const CLIENT_HELLO_RANDOM_OFFSET: usize = 11;
+const CLIENT_HELLO_RANDOM_LEN: usize = 32;
+const CLIENT_HELLO_SESSION_ID_LEN_OFFSET: usize = 43;
+const CLIENT_HELLO_SESSION_ID_OFFSET: usize = 44;
+const CLIENT_HELLO_SESSION_ID_LEN: usize = 32;
+const HANDSHAKE_SESSION_ID_LEN_OFFSET: usize = 38;
+
+#[derive(Debug)]
+struct ClientHelloLayout {
+    record_len: usize,
+}
+
+impl ClientHelloLayout {
+    fn parse(record: &[u8]) -> Result<Self, ClientHelloError> {
+        if record.len() < TLS_RECORD_HEADER_LEN {
+            return Err(ClientHelloError::InvalidLayout(
+                "ClientHello record truncated before TLS header",
+            ));
+        }
+
+        if record[0] != 0x16 {
+            return Err(ClientHelloError::InvalidLayout(
+                "expected a TLS handshake record",
+            ));
+        }
+
+        let record_len = u16::from_be_bytes([record[3], record[4]]) as usize;
+        let record_end = TLS_RECORD_HEADER_LEN + record_len;
+        if record.len() < record_end {
+            return Err(ClientHelloError::InvalidLayout(
+                "ClientHello record truncated",
+            ));
+        }
+
+        let handshake = &record[TLS_RECORD_HEADER_LEN..record_end];
+        if handshake.len() < TLS_HANDSHAKE_HEADER_LEN {
+            return Err(ClientHelloError::InvalidLayout(
+                "ClientHello handshake header truncated",
+            ));
+        }
+
+        if handshake[0] != CLIENT_HELLO_HANDSHAKE_TYPE {
+            return Err(ClientHelloError::InvalidLayout(
+                "expected a ClientHello handshake message",
+            ));
+        }
+
+        let handshake_len =
+            u32::from_be_bytes([0, handshake[1], handshake[2], handshake[3]]) as usize;
+        if handshake.len() != TLS_HANDSHAKE_HEADER_LEN + handshake_len {
+            return Err(ClientHelloError::InvalidLayout(
+                "ClientHello handshake length mismatch",
+            ));
+        }
+
+        if handshake.len() < HANDSHAKE_SESSION_ID_LEN_OFFSET + 1 + CLIENT_HELLO_SESSION_ID_LEN {
+            return Err(ClientHelloError::InvalidLayout(
+                "ClientHello session_id truncated",
+            ));
+        }
+
+        if handshake[HANDSHAKE_SESSION_ID_LEN_OFFSET] != CLIENT_HELLO_SESSION_ID_LEN as u8 {
+            return Err(ClientHelloError::InvalidLayout(
+                "unexpected ClientHello session_id length",
+            ));
+        }
+
+        Ok(Self { record_len })
+    }
+
+    fn handshake_range(&self) -> std::ops::Range<usize> {
+        TLS_RECORD_HEADER_LEN..TLS_RECORD_HEADER_LEN + self.record_len
+    }
+
+    fn session_id_range(&self) -> std::ops::Range<usize> {
+        CLIENT_HELLO_SESSION_ID_OFFSET..CLIENT_HELLO_SESSION_ID_OFFSET + CLIENT_HELLO_SESSION_ID_LEN
+    }
+}
+
+/// Errors produced while inspecting or patching a captured ClientHello.
+#[derive(Debug)]
+pub enum ClientHelloError {
+    MissingClientHello,
+    MissingX25519PrivateKey,
+    InvalidLayout(&'static str),
+    Btls(ErrorStack),
+}
+
+impl fmt::Display for ClientHelloError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingClientHello => f.write_str("no captured ClientHello is available"),
+            Self::MissingX25519PrivateKey => {
+                f.write_str("captured ClientHello has no X25519 private key")
+            }
+            Self::InvalidLayout(message) => f.write_str(message),
+            Self::Btls(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl StdError for ClientHelloError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Btls(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<ErrorStack> for ClientHelloError {
+    fn from(error: ErrorStack) -> Self {
+        Self::Btls(error)
+    }
+}
+
+/// Errors produced by [`SslStream::connect_with_client_hello_patch`].
+#[derive(Debug)]
+pub enum ConnectWithClientHelloPatchError<E> {
+    BuildClientHello(ErrorStack),
+    ClientHello(ClientHelloError),
+    Patch(E),
+    Handshake(ssl::Error),
+}
+
+impl<E: fmt::Display> fmt::Display for ConnectWithClientHelloPatchError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BuildClientHello(err) => write!(f, "build_client_hello failed: {err}"),
+            Self::ClientHello(err) => write!(f, "captured ClientHello failed: {err}"),
+            Self::Patch(err) => write!(f, "ClientHello patch failed: {err}"),
+            Self::Handshake(err) => write!(f, "TLS handshake failed: {err}"),
+        }
+    }
+}
+
+impl<E> StdError for ConnectWithClientHelloPatchError<E>
+where
+    E: StdError + 'static,
+{
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::BuildClientHello(err) => Some(err),
+            Self::ClientHello(err) => Some(err),
+            Self::Patch(err) => Some(err),
+            Self::Handshake(err) => Some(err),
+        }
+    }
+}
+
+/// A typed view over the currently captured ClientHello.
+pub struct CapturedClientHello<'a, S> {
+    stream: &'a mut SslStream<S>,
+}
+
+impl<S> fmt::Debug for CapturedClientHello<'_, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapturedClientHello")
+            .finish_non_exhaustive()
+    }
+}
+
 /// An asynchronous version of [`btls::ssl::SslStream`].
 #[derive(Debug)]
 pub struct SslStream<S>(SslStreamCore<StreamWrapper<S>>);
@@ -170,11 +336,9 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), ErrorStack>> {
-        self.with_context(cx, |s| {
-            match s.build_client_hello() {
-                Ok(()) => Poll::Ready(Ok(())),
-                Err(e) => Poll::Ready(Err(e)),
-            }
+        self.with_context(cx, |s| match s.build_client_hello() {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(e) => Poll::Ready(Err(e)),
         })
     }
 
@@ -182,6 +346,33 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
     #[inline]
     pub async fn build_client_hello(mut self: Pin<&mut Self>) -> Result<(), ErrorStack> {
         future::poll_fn(|cx| self.as_mut().poll_build_client_hello(cx)).await
+    }
+
+    /// Builds, patches, and sends a ClientHello before completing the handshake.
+    pub async fn connect_with_client_hello_patch<E, F>(
+        mut self: Pin<&mut Self>,
+        patch: F,
+    ) -> Result<(), ConnectWithClientHelloPatchError<E>>
+    where
+        F: FnOnce(&mut CapturedClientHello<'_, S>) -> Result<(), E>,
+    {
+        self.as_mut()
+            .build_client_hello()
+            .await
+            .map_err(ConnectWithClientHelloPatchError::BuildClientHello)?;
+
+        {
+            // Safety: we do not move the stream while the temporary wrapper exists.
+            let this = unsafe { self.as_mut().get_unchecked_mut() };
+            let mut hello = this
+                .captured_client_hello()
+                .map_err(ConnectWithClientHelloPatchError::ClientHello)?;
+            patch(&mut hello).map_err(ConnectWithClientHelloPatchError::Patch)?;
+        }
+
+        self.finish_connect()
+            .await
+            .map_err(ConnectWithClientHelloPatchError::Handshake)
     }
 
     /// Like [`SslStream::finish_connect`](ssl::SslStream::finish_connect).
@@ -203,6 +394,17 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
 }
 
 impl<S> SslStream<S> {
+    /// Returns a typed view over the captured ClientHello.
+    pub fn captured_client_hello(
+        &mut self,
+    ) -> Result<CapturedClientHello<'_, S>, ClientHelloError> {
+        if self.0.pending_client_hello().is_some() {
+            Ok(CapturedClientHello { stream: self })
+        } else {
+            Err(ClientHelloError::MissingClientHello)
+        }
+    }
+
     /// Returns the captured ClientHello bytes, if available.
     ///
     /// This delegates to the inner [`SslStream::pending_client_hello`](ssl::SslStream::pending_client_hello).
@@ -217,6 +419,60 @@ impl<S> SslStream<S> {
     #[inline]
     pub fn set_client_hello(&mut self, data: &[u8]) -> Result<(), ErrorStack> {
         self.0.set_client_hello(data)
+    }
+}
+
+impl<S> CapturedClientHello<'_, S> {
+    fn record_bytes(&self) -> Result<&[u8], ClientHelloError> {
+        self.stream
+            .0
+            .pending_client_hello()
+            .ok_or(ClientHelloError::MissingClientHello)
+    }
+
+    fn layout(&self) -> Result<ClientHelloLayout, ClientHelloError> {
+        ClientHelloLayout::parse(self.record_bytes()?)
+    }
+
+    /// Returns the exact client_random bytes that will be sent on the wire.
+    pub fn client_random(&self) -> Result<[u8; 32], ClientHelloError> {
+        let record = self.record_bytes()?;
+        self.layout()?;
+
+        let mut client_random = [0u8; CLIENT_HELLO_RANDOM_LEN];
+        client_random.copy_from_slice(
+            &record
+                [CLIENT_HELLO_RANDOM_OFFSET..CLIENT_HELLO_RANDOM_OFFSET + CLIENT_HELLO_RANDOM_LEN],
+        );
+        Ok(client_random)
+    }
+
+    /// Returns the exported X25519 private key associated with the key share.
+    pub fn x25519_private_key(&self) -> Result<[u8; 32], ClientHelloError> {
+        self.stream
+            .ssl()
+            .get_x25519_private_key()
+            .ok_or(ClientHelloError::MissingX25519PrivateKey)
+    }
+
+    /// Returns the inner TLS handshake bytes for the captured ClientHello.
+    pub fn handshake_bytes(&self) -> Result<&[u8], ClientHelloError> {
+        let record = self.record_bytes()?;
+        let layout = self.layout()?;
+        Ok(&record[layout.handshake_range()])
+    }
+
+    /// Patches the legacy session_id in both the captured bytes and btls transcript state.
+    pub fn set_session_id(&mut self, session_id: [u8; 32]) -> Result<(), ClientHelloError> {
+        let layout = self.layout()?;
+        let mut record = self.record_bytes()?.to_vec();
+        record[CLIENT_HELLO_SESSION_ID_LEN_OFFSET] = CLIENT_HELLO_SESSION_ID_LEN as u8;
+        record[layout.session_id_range()].copy_from_slice(&session_id);
+        self.stream.set_client_hello(&record)?;
+        self.stream
+            .ssl_mut()
+            .set_client_hello_session_id(&session_id)?;
+        Ok(())
     }
 }
 

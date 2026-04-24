@@ -107,7 +107,8 @@ pub use self::async_callbacks::{
     BoxPrivateKeyMethodFuture, BoxSelectCertFinish, BoxSelectCertFuture, ExDataFuture,
 };
 pub use self::connector::{
-    ConnectConfiguration, SslAcceptor, SslAcceptorBuilder, SslConnector, SslConnectorBuilder,
+    ConnectConfiguration, FingerprintProfile, ResolvedFingerprintProfile, SslAcceptor,
+    SslAcceptorBuilder, SslConnector, SslConnectorBuilder, TlsClientOptions, TlsClientProfileSpec,
 };
 #[cfg(feature = "credential")]
 pub use self::credential::{SslCredential, SslCredentialBuilder, SslCredentialRef};
@@ -4262,7 +4263,10 @@ impl<S: Read + Write> SslStream<S> {
             //    SSL_set0_wbio will release the current wbio, so we need
             //    to protect it with an extra reference.
             let orig_wbio = ffi::SSL_get_wbio(ssl_ptr);
-            assert!(!orig_wbio.is_null(), "wbio must be set before build_client_hello");
+            assert!(
+                !orig_wbio.is_null(),
+                "wbio must be set before build_client_hello"
+            );
             ffi::BIO_up_ref(orig_wbio);
 
             // 3. Create memory BIO for capturing the ClientHello
