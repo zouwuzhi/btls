@@ -654,6 +654,10 @@ pub(super) unsafe extern "C" fn raw_ssl_cert_compress<C>(
 where
     C: CertificateCompressor,
 {
+    const {
+        assert!(C::CAN_COMPRESS);
+    }
+
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 
@@ -681,6 +685,10 @@ pub(super) unsafe extern "C" fn raw_ssl_cert_decompress<C>(
 where
     C: CertificateCompressor,
 {
+    const {
+        assert!(C::CAN_DECOMPRESS);
+    }
+
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 

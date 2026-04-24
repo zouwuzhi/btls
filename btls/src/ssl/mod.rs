@@ -989,7 +989,7 @@ impl SslContextBuilder {
     /// The context must own its cert store exclusively.
     pub unsafe fn from_ptr(ctx: *mut ffi::SSL_CTX) -> Self {
         Self {
-            ctx: SslContext::from_ptr(ctx),
+            ctx: unsafe { SslContext::from_ptr(ctx) },
             has_shared_cert_store: false,
         }
     }
@@ -1002,7 +1002,9 @@ impl SslContextBuilder {
     /// X.509 certificates with an object configured with this method.
     /// You most probably don't need it.
     pub unsafe fn assume_x509(&mut self) {
-        self.ctx.assume_x509();
+        unsafe {
+            self.ctx.assume_x509();
+        }
     }
 
     /// Returns a pointer to the raw OpenSSL value.
@@ -1695,12 +1697,27 @@ impl SslContextBuilder {
     where
         C: CertificateCompressor,
     {
+        const {
+            assert!(C::CAN_COMPRESS || C::CAN_DECOMPRESS, "Either compression or decompression must be supported for algorithm to be registered");
+        };
         let success = unsafe {
             ffi::SSL_CTX_add_cert_compression_alg(
                 self.as_ptr(),
-                compressor.algorithm().0,
-                Some(callbacks::raw_ssl_cert_compress::<C>),
-                Some(callbacks::raw_ssl_cert_decompress::<C>),
+                C::ALGORITHM.0,
+                const {
+                    if C::CAN_COMPRESS {
+                        Some(callbacks::raw_ssl_cert_compress::<C>)
+                    } else {
+                        None
+                    }
+                },
+                const {
+                    if C::CAN_DECOMPRESS {
+                        Some(callbacks::raw_ssl_cert_decompress::<C>)
+                    } else {
+                        None
+                    }
+                },
             ) == 1
         };
         if !success {
@@ -1905,7 +1922,9 @@ impl SslContextBuilder {
             + Send,
     {
         self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
-        ffi::SSL_CTX_sess_set_get_cb(self.as_ptr(), Some(callbacks::raw_get_session::<F>));
+        unsafe {
+            ffi::SSL_CTX_sess_set_get_cb(self.as_ptr(), Some(callbacks::raw_get_session::<F>));
+        }
     }
 
     /// Sets the TLS key logging callback.
@@ -2306,9 +2325,11 @@ impl SslContextRef {
     // this only from SslContextBuilder.
     #[corresponds(SSL_CTX_get_ex_data)]
     unsafe fn ex_data_mut<T>(&mut self, index: Index<SslContext, T>) -> Option<&mut T> {
-        ffi::SSL_CTX_get_ex_data(self.as_ptr(), index.as_raw())
-            .cast::<T>()
-            .as_mut()
+        unsafe {
+            ffi::SSL_CTX_get_ex_data(self.as_ptr(), index.as_raw())
+                .cast::<T>()
+                .as_mut()
+        }
     }
 
     // Unsafe because SSL contexts are not guaranteed to be unique, we call
@@ -2325,13 +2346,15 @@ impl SslContextRef {
     // this only from SslContextBuilder.
     #[corresponds(SSL_CTX_set_ex_data)]
     unsafe fn replace_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) -> Option<T> {
-        if let Some(old) = self.ex_data_mut(index) {
-            return Some(mem::replace(old, data));
+        unsafe {
+            if let Some(old) = self.ex_data_mut(index) {
+                return Some(mem::replace(old, data));
+            }
+
+            self.set_ex_data(index, data);
+
+            None
         }
-
-        self.set_ex_data(index, data);
-
-        None
     }
 
     /// Adds a session to the context's cache.
@@ -2345,7 +2368,7 @@ impl SslContextRef {
     #[corresponds(SSL_CTX_add_session)]
     #[must_use]
     pub unsafe fn add_session(&self, session: &SslSessionRef) -> bool {
-        ffi::SSL_CTX_add_session(self.as_ptr(), session.as_ptr()) != 0
+        unsafe { ffi::SSL_CTX_add_session(self.as_ptr(), session.as_ptr()) != 0 }
     }
 
     /// Removes a session from the context's cache and marks it as non-resumable.
@@ -2359,7 +2382,7 @@ impl SslContextRef {
     #[corresponds(SSL_CTX_remove_session)]
     #[must_use]
     pub unsafe fn remove_session(&self, session: &SslSessionRef) -> bool {
-        ffi::SSL_CTX_remove_session(self.as_ptr(), session.as_ptr()) != 0
+        unsafe { ffi::SSL_CTX_remove_session(self.as_ptr(), session.as_ptr()) != 0 }
     }
 
     /// Returns the context's session cache size limit.
@@ -2392,7 +2415,9 @@ impl SslContextRef {
     /// X.509 certificates with an object configured with this method.
     /// You most probably don't need it.
     pub unsafe fn assume_x509(&mut self) {
-        self.replace_ex_data(*X509_FLAG_INDEX, true);
+        unsafe {
+            self.replace_ex_data(*X509_FLAG_INDEX, true);
+        }
     }
 
     /// Returns `true` if context is configured for X.509 certificates.
@@ -2530,7 +2555,7 @@ unsafe impl ForeignType for SslCipher {
 
     #[inline]
     unsafe fn from_ptr(ptr: *mut ffi::SSL_CIPHER) -> SslCipher {
-        SslCipher(SslCipherRef::from_ptr(ptr))
+        SslCipher(unsafe { SslCipherRef::from_ptr(ptr) })
     }
 
     #[inline]
@@ -3615,7 +3640,7 @@ impl SslRef {
     /// with the same `SslContext` as this `Ssl`.
     #[corresponds(SSL_set_session)]
     pub unsafe fn set_session(&mut self, session: &SslSessionRef) -> Result<(), ErrorStack> {
-        cvt(ffi::SSL_set_session(self.as_ptr(), session.as_ptr()))
+        unsafe { cvt(ffi::SSL_set_session(self.as_ptr(), session.as_ptr())) }
     }
 
     /// Determines if the session provided to `set_session` was successfully reused.
@@ -4086,7 +4111,7 @@ impl<S: Read + Write> SslStream<S> {
     ///
     /// The caller must ensure the pointer is valid.
     pub unsafe fn from_raw_parts(ssl: *mut ffi::SSL, stream: S) -> Self {
-        let ssl = Ssl::from_ptr(ssl);
+        let ssl = unsafe { Ssl::from_ptr(ssl) };
         Self::new(ssl, stream).unwrap()
     }
 
@@ -4764,25 +4789,43 @@ impl PrivateKeyMethodError {
 }
 
 /// Describes certificate compression algorithm. Implementation MUST implement transformation at least in one direction.
-pub trait CertificateCompressor: fmt::Debug + Send + Sync + 'static {
+pub trait CertificateCompressor: Send + Sync + 'static {
+    /// An IANA assigned identifier of compression algorithm
+    const ALGORITHM: CertificateCompressionAlgorithm;
+
+    /// Indicates if compressor support compression
+    const CAN_COMPRESS: bool;
+
+    /// Indicates if compressor support decompression
+    const CAN_DECOMPRESS: bool;
+
     /// Perform compression of `input` buffer and write compressed data to `output`.
-    fn compress(&self, input: &[u8], output: &mut dyn std::io::Write) -> std::io::Result<()>;
+    #[allow(unused_variables)]
+    fn compress<W>(&self, input: &[u8], output: &mut W) -> std::io::Result<()>
+    where
+        W: std::io::Write,
+    {
+        Err(std::io::Error::other("not implemented"))
+    }
 
     /// Perform decompression of `input` buffer and write compressed data to `output`.
-    fn decompress(&self, input: &[u8], output: &mut dyn std::io::Write) -> std::io::Result<()>;
-
-    /// An IANA assigned identifier of compression algorithm
-    fn algorithm(&self) -> CertificateCompressionAlgorithm;
+    #[allow(unused_variables)]
+    fn decompress<W>(&self, input: &[u8], output: &mut W) -> std::io::Result<()>
+    where
+        W: std::io::Write,
+    {
+        Err(std::io::Error::other("not implemented"))
+    }
 }
 
 use crate::ffi::{SSL_CTX_up_ref, SSL_SESSION_get_master_key, SSL_SESSION_up_ref, SSL_is_server};
 
 unsafe fn get_new_idx(f: ffi::CRYPTO_EX_free) -> c_int {
-    ffi::SSL_CTX_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f)
+    unsafe { ffi::SSL_CTX_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }
 }
 
 unsafe fn get_new_ssl_idx(f: ffi::CRYPTO_EX_free) -> c_int {
-    ffi::SSL_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f)
+    unsafe { ffi::SSL_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }
 }
 
 fn path_to_cstring(path: &Path) -> Result<CString, ErrorStack> {
