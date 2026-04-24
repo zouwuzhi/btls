@@ -6,7 +6,7 @@ use crate::dh::Dh;
 use crate::error::ErrorStack;
 use crate::ssl::{
     HandshakeError, KeyShare, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod,
-    SslMode, SslOptions, SslRef, SslSignatureAlgorithm, SslStream, SslVerifyMode,
+    SslMode, SslOptions, SslRef, SslSignatureAlgorithm, SslStream, SslVerifyMode, SslVersion,
 };
 use crate::version;
 use std::net::IpAddr;
@@ -44,13 +44,19 @@ const CHROME_FINGERPRINT_PROFILE: ResolvedFingerprintProfile = ResolvedFingerpri
                   ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
                   ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
                   ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305",
+    min_tls_version: Some(SslVersion::TLS1_2),
+    max_tls_version: Some(SslVersion::TLS1_3),
     curves_list: "X25519:P-256:P-384",
     grease_enabled: true,
     enable_ech_grease: true,
+    enable_ocsp_stapling: true,
+    enable_signed_cert_timestamps: true,
     permute_extensions: true,
     preserve_tls13_cipher_list: true,
     verify_algorithm_prefs: &DEFAULT_VERIFY_ALGORITHM_PREFS,
     key_shares: &[],
+    default_alps_protocols: &[b"h2"],
+    alps_use_new_codepoint: false,
     default_alpn_protocols: &DEFAULT_HTTP_ALPN_PROTOCOLS,
 };
 
@@ -61,13 +67,19 @@ const SAFARI_FINGERPRINT_PROFILE: ResolvedFingerprintProfile = ResolvedFingerpri
                   ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:\
                   ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:\
                   ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305",
+    min_tls_version: Some(SslVersion::TLS1),
+    max_tls_version: Some(SslVersion::TLS1_3),
     curves_list: "X25519:P-256:P-384:P-521",
     grease_enabled: true,
     enable_ech_grease: false,
+    enable_ocsp_stapling: true,
+    enable_signed_cert_timestamps: true,
     permute_extensions: false,
     preserve_tls13_cipher_list: true,
     verify_algorithm_prefs: &DEFAULT_VERIFY_ALGORITHM_PREFS,
     key_shares: &[],
+    default_alps_protocols: &[],
+    alps_use_new_codepoint: false,
     default_alpn_protocols: &DEFAULT_HTTP_ALPN_PROTOCOLS,
 };
 
@@ -115,13 +127,19 @@ impl FromStr for FingerprintProfile {
 pub struct ResolvedFingerprintProfile {
     name: &'static str,
     cipher_list: &'static str,
+    min_tls_version: Option<SslVersion>,
+    max_tls_version: Option<SslVersion>,
     curves_list: &'static str,
     grease_enabled: bool,
     enable_ech_grease: bool,
+    enable_ocsp_stapling: bool,
+    enable_signed_cert_timestamps: bool,
     permute_extensions: bool,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: &'static [SslSignatureAlgorithm],
     key_shares: &'static [KeyShare],
+    default_alps_protocols: &'static [&'static [u8]],
+    alps_use_new_codepoint: bool,
     default_alpn_protocols: &'static [&'static [u8]],
 }
 
@@ -137,6 +155,16 @@ impl ResolvedFingerprintProfile {
     }
 
     #[must_use]
+    pub fn min_tls_version(self) -> Option<SslVersion> {
+        self.min_tls_version
+    }
+
+    #[must_use]
+    pub fn max_tls_version(self) -> Option<SslVersion> {
+        self.max_tls_version
+    }
+
+    #[must_use]
     pub fn curves_list(self) -> &'static str {
         self.curves_list
     }
@@ -149,6 +177,16 @@ impl ResolvedFingerprintProfile {
     #[must_use]
     pub fn enable_ech_grease(self) -> bool {
         self.enable_ech_grease
+    }
+
+    #[must_use]
+    pub fn enable_ocsp_stapling(self) -> bool {
+        self.enable_ocsp_stapling
+    }
+
+    #[must_use]
+    pub fn enable_signed_cert_timestamps(self) -> bool {
+        self.enable_signed_cert_timestamps
     }
 
     #[must_use]
@@ -172,6 +210,16 @@ impl ResolvedFingerprintProfile {
     }
 
     #[must_use]
+    pub fn default_alps_protocols(self) -> &'static [&'static [u8]] {
+        self.default_alps_protocols
+    }
+
+    #[must_use]
+    pub fn alps_use_new_codepoint(self) -> bool {
+        self.alps_use_new_codepoint
+    }
+
+    #[must_use]
     pub fn default_alpn_protocols(self) -> &'static [&'static [u8]] {
         self.default_alpn_protocols
     }
@@ -186,13 +234,19 @@ impl ResolvedFingerprintProfile {
 pub struct TlsClientProfileSpec {
     name: Option<String>,
     cipher_list: String,
+    min_tls_version: Option<SslVersion>,
+    max_tls_version: Option<SslVersion>,
     curves_list: String,
     grease_enabled: bool,
     enable_ech_grease: bool,
+    enable_ocsp_stapling: bool,
+    enable_signed_cert_timestamps: bool,
     permute_extensions: bool,
     preserve_tls13_cipher_list: bool,
     verify_algorithm_prefs: Vec<SslSignatureAlgorithm>,
     key_shares: Vec<KeyShare>,
+    default_alps_protocols: Vec<Vec<u8>>,
+    alps_use_new_codepoint: bool,
     default_alpn_protocols: Vec<Vec<u8>>,
 }
 
@@ -209,13 +263,19 @@ impl TlsClientProfileSpec {
         Self {
             name: None,
             cipher_list: cipher_list.into(),
+            min_tls_version: None,
+            max_tls_version: None,
             curves_list: curves_list.into(),
             grease_enabled: false,
             enable_ech_grease: false,
+            enable_ocsp_stapling: false,
+            enable_signed_cert_timestamps: false,
             permute_extensions: false,
             preserve_tls13_cipher_list: false,
             verify_algorithm_prefs: verify_algorithm_prefs.into_iter().collect(),
             key_shares: Vec::new(),
+            default_alps_protocols: Vec::new(),
+            alps_use_new_codepoint: false,
             default_alpn_protocols: Vec::new(),
         }
     }
@@ -226,9 +286,33 @@ impl TlsClientProfileSpec {
         self
     }
 
+    /// Sets the minimum TLS protocol version.
+    pub fn min_tls_version(mut self, version: Option<SslVersion>) -> Self {
+        self.min_tls_version = version;
+        self
+    }
+
+    /// Sets the maximum TLS protocol version.
+    pub fn max_tls_version(mut self, version: Option<SslVersion>) -> Self {
+        self.max_tls_version = version;
+        self
+    }
+
     /// Sets whether RFC 8701 GREASE values should be enabled.
     pub fn enable_grease(mut self, enabled: bool) -> Self {
         self.grease_enabled = enabled;
+        self
+    }
+
+    /// Sets whether OCSP stapling should be requested.
+    pub fn enable_ocsp_stapling(mut self, enabled: bool) -> Self {
+        self.enable_ocsp_stapling = enabled;
+        self
+    }
+
+    /// Sets whether SCT should be requested.
+    pub fn enable_signed_cert_timestamps(mut self, enabled: bool) -> Self {
+        self.enable_signed_cert_timestamps = enabled;
         self
     }
 
@@ -259,6 +343,25 @@ impl TlsClientProfileSpec {
         self
     }
 
+    /// Sets default ALPS protocols used by the profile.
+    pub fn default_alps_protocols<I, P>(mut self, protocols: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<[u8]>,
+    {
+        self.default_alps_protocols = protocols
+            .into_iter()
+            .map(|protocol| protocol.as_ref().to_vec())
+            .collect();
+        self
+    }
+
+    /// Sets whether ALPS should use the newer codepoint.
+    pub fn alps_use_new_codepoint(mut self, enabled: bool) -> Self {
+        self.alps_use_new_codepoint = enabled;
+        self
+    }
+
     /// Sets default ALPN protocols used when [`TlsClientOptions`] has no ALPN override.
     pub fn default_alpn_protocols<I, P>(mut self, protocols: I) -> Self
     where
@@ -284,6 +387,18 @@ impl TlsClientProfileSpec {
         &self.cipher_list
     }
 
+    /// Returns the configured minimum TLS protocol version.
+    #[must_use]
+    pub fn min_tls_version_value(&self) -> Option<SslVersion> {
+        self.min_tls_version
+    }
+
+    /// Returns the configured maximum TLS protocol version.
+    #[must_use]
+    pub fn max_tls_version_value(&self) -> Option<SslVersion> {
+        self.max_tls_version
+    }
+
     /// Returns the configured curves list.
     #[must_use]
     pub fn curves_list(&self) -> &str {
@@ -300,6 +415,18 @@ impl TlsClientProfileSpec {
     #[must_use]
     pub fn ech_grease_enabled(&self) -> bool {
         self.enable_ech_grease
+    }
+
+    /// Returns whether OCSP stapling should be requested.
+    #[must_use]
+    pub fn ocsp_stapling_enabled(&self) -> bool {
+        self.enable_ocsp_stapling
+    }
+
+    /// Returns whether SCT should be requested.
+    #[must_use]
+    pub fn signed_cert_timestamps_enabled(&self) -> bool {
+        self.enable_signed_cert_timestamps
     }
 
     /// Returns whether ClientHello extensions should be permuted.
@@ -324,6 +451,18 @@ impl TlsClientProfileSpec {
     #[must_use]
     pub fn key_shares(&self) -> &[KeyShare] {
         &self.key_shares
+    }
+
+    /// Returns default ALPS protocols used by the profile.
+    #[must_use]
+    pub fn default_alps_protocols_ref(&self) -> &[Vec<u8>] {
+        &self.default_alps_protocols
+    }
+
+    /// Returns whether ALPS should use the newer codepoint.
+    #[must_use]
+    pub fn alps_use_new_codepoint_enabled(&self) -> bool {
+        self.alps_use_new_codepoint
     }
 
     /// Returns default ALPN protocols used when [`TlsClientOptions`] has no ALPN override.
@@ -416,9 +555,21 @@ impl TlsClientOptions {
     /// Applies per-connection TLS options to an [`Ssl`] before the handshake starts.
     pub fn apply_ssl_options(&self, ssl: &mut Ssl) -> Result<(), ErrorStack> {
         if let Some(spec) = self.fingerprint_spec_ref() {
-            apply_ssl_fingerprint_settings(ssl, spec.ech_grease_enabled(), spec.key_shares())?;
+            apply_ssl_fingerprint_settings(
+                ssl,
+                spec.ech_grease_enabled(),
+                spec.key_shares(),
+                spec.default_alps_protocols_ref(),
+                spec.alps_use_new_codepoint_enabled(),
+            )?;
         } else if let Some(profile) = self.resolved_fingerprint_profile() {
-            apply_ssl_fingerprint_settings(ssl, profile.enable_ech_grease(), profile.key_shares())?;
+            apply_ssl_fingerprint_settings(
+                ssl,
+                profile.enable_ech_grease(),
+                profile.key_shares(),
+                profile.default_alps_protocols(),
+                profile.alps_use_new_codepoint(),
+            )?;
         }
 
         Ok(())
@@ -463,12 +614,65 @@ fn apply_ssl_fingerprint_settings(
     ssl: &mut Ssl,
     enable_ech_grease: bool,
     key_shares: &[KeyShare],
+    alps_protocols: &[impl AsRef<[u8]>],
+    alps_use_new_codepoint: bool,
 ) -> Result<(), ErrorStack> {
     ssl.set_enable_ech_grease(enable_ech_grease);
     if !key_shares.is_empty() {
         ssl.set_client_key_shares(key_shares)?;
     }
+    for protocol in alps_protocols {
+        ssl.add_application_settings(protocol.as_ref())?;
+    }
+    if !alps_protocols.is_empty() {
+        ssl.set_alps_use_new_codepoint(alps_use_new_codepoint);
+    }
     Ok(())
+}
+
+struct FingerprintSettings<'a> {
+    cipher_list: &'a str,
+    min_tls_version: Option<SslVersion>,
+    max_tls_version: Option<SslVersion>,
+    curves_list: &'a str,
+    grease_enabled: bool,
+    permute_extensions: bool,
+    preserve_tls13_cipher_list: bool,
+    verify_algorithm_prefs: &'a [SslSignatureAlgorithm],
+    enable_ocsp_stapling: bool,
+    enable_signed_cert_timestamps: bool,
+}
+
+impl<'a> FingerprintSettings<'a> {
+    fn from_spec(spec: &'a TlsClientProfileSpec) -> Self {
+        Self {
+            cipher_list: spec.cipher_list(),
+            min_tls_version: spec.min_tls_version_value(),
+            max_tls_version: spec.max_tls_version_value(),
+            curves_list: spec.curves_list(),
+            grease_enabled: spec.grease_enabled(),
+            permute_extensions: spec.permute_extensions_enabled(),
+            preserve_tls13_cipher_list: spec.preserve_tls13_cipher_list_enabled(),
+            verify_algorithm_prefs: spec.verify_algorithm_prefs(),
+            enable_ocsp_stapling: spec.ocsp_stapling_enabled(),
+            enable_signed_cert_timestamps: spec.signed_cert_timestamps_enabled(),
+        }
+    }
+
+    fn from_profile(profile: ResolvedFingerprintProfile) -> Self {
+        Self {
+            cipher_list: profile.cipher_list(),
+            min_tls_version: profile.min_tls_version(),
+            max_tls_version: profile.max_tls_version(),
+            curves_list: profile.curves_list(),
+            grease_enabled: profile.grease_enabled(),
+            permute_extensions: profile.permute_extensions(),
+            preserve_tls13_cipher_list: profile.preserve_tls13_cipher_list(),
+            verify_algorithm_prefs: profile.verify_algorithm_prefs(),
+            enable_ocsp_stapling: profile.enable_ocsp_stapling(),
+            enable_signed_cert_timestamps: profile.enable_signed_cert_timestamps(),
+        }
+    }
 }
 
 #[allow(clippy::inconsistent_digit_grouping)]
@@ -595,23 +799,9 @@ impl SslConnectorBuilder {
     /// Applies high-level client TLS options to the connector builder.
     pub fn apply_client_options(&mut self, options: &TlsClientOptions) -> Result<(), ErrorStack> {
         if let Some(spec) = options.fingerprint_spec_ref() {
-            self.apply_fingerprint_settings(
-                spec.cipher_list(),
-                spec.curves_list(),
-                spec.grease_enabled(),
-                spec.permute_extensions_enabled(),
-                spec.preserve_tls13_cipher_list_enabled(),
-                spec.verify_algorithm_prefs(),
-            )?;
+            self.apply_fingerprint_settings(FingerprintSettings::from_spec(spec))?;
         } else if let Some(profile) = options.resolved_fingerprint_profile() {
-            self.apply_fingerprint_settings(
-                profile.cipher_list(),
-                profile.curves_list(),
-                profile.grease_enabled(),
-                profile.permute_extensions(),
-                profile.preserve_tls13_cipher_list(),
-                profile.verify_algorithm_prefs(),
-            )?;
+            self.apply_fingerprint_settings(FingerprintSettings::from_profile(profile))?;
         }
 
         if options.session_tickets_enabled() {
@@ -629,20 +819,23 @@ impl SslConnectorBuilder {
 
     fn apply_fingerprint_settings(
         &mut self,
-        cipher_list: &str,
-        curves_list: &str,
-        grease_enabled: bool,
-        permute_extensions: bool,
-        preserve_tls13_cipher_list: bool,
-        verify_algorithm_prefs: &[SslSignatureAlgorithm],
+        settings: FingerprintSettings<'_>,
     ) -> Result<(), ErrorStack> {
+        self.set_min_proto_version(settings.min_tls_version)?;
+        self.set_max_proto_version(settings.max_tls_version)?;
         #[cfg(not(feature = "fips"))]
-        self.set_preserve_tls13_cipher_list(preserve_tls13_cipher_list);
-        self.set_cipher_list(cipher_list)?;
-        self.set_curves_list(curves_list)?;
-        self.set_grease_enabled(grease_enabled);
-        self.set_permute_extensions(permute_extensions);
-        self.set_verify_algorithm_prefs(verify_algorithm_prefs)?;
+        self.set_preserve_tls13_cipher_list(settings.preserve_tls13_cipher_list);
+        self.set_cipher_list(settings.cipher_list)?;
+        self.set_curves_list(settings.curves_list)?;
+        self.set_grease_enabled(settings.grease_enabled);
+        self.set_permute_extensions(settings.permute_extensions);
+        self.set_verify_algorithm_prefs(settings.verify_algorithm_prefs)?;
+        if settings.enable_ocsp_stapling {
+            self.enable_ocsp_stapling();
+        }
+        if settings.enable_signed_cert_timestamps {
+            self.enable_signed_cert_timestamps();
+        }
         Ok(())
     }
 
@@ -843,30 +1036,52 @@ mod tests {
     #[test]
     fn fingerprint_profiles_include_grease_defaults() {
         let chrome = FingerprintProfile::Chrome.resolve();
+        assert_eq!(chrome.min_tls_version(), Some(SslVersion::TLS1_2));
+        assert_eq!(chrome.max_tls_version(), Some(SslVersion::TLS1_3));
         assert!(chrome.grease_enabled());
         assert!(chrome.enable_ech_grease());
+        assert!(chrome.enable_ocsp_stapling());
+        assert!(chrome.enable_signed_cert_timestamps());
         assert!(chrome.key_shares().is_empty());
+        assert_eq!(chrome.default_alps_protocols(), &[b"h2".as_slice()]);
 
         let safari = FingerprintProfile::Safari.resolve();
+        assert_eq!(safari.min_tls_version(), Some(SslVersion::TLS1));
+        assert_eq!(safari.max_tls_version(), Some(SslVersion::TLS1_3));
         assert!(safari.grease_enabled());
         assert!(!safari.enable_ech_grease());
+        assert!(safari.enable_ocsp_stapling());
+        assert!(safari.enable_signed_cert_timestamps());
         assert!(safari.key_shares().is_empty());
+        assert!(safari.default_alps_protocols().is_empty());
     }
 
     #[test]
-    fn raw_profile_exposes_grease_and_key_share_settings() {
+    fn raw_profile_exposes_fine_grained_settings() {
         let spec = TlsClientProfileSpec::new(
             CHROME_FINGERPRINT_PROFILE.cipher_list(),
             CHROME_FINGERPRINT_PROFILE.curves_list(),
             DEFAULT_VERIFY_ALGORITHM_PREFS,
         )
+        .min_tls_version(Some(SslVersion::TLS1_2))
+        .max_tls_version(Some(SslVersion::TLS1_3))
         .enable_grease(true)
         .enable_ech_grease(true)
-        .client_key_shares([KeyShare::X25519, KeyShare::P256]);
+        .enable_ocsp_stapling(true)
+        .enable_signed_cert_timestamps(true)
+        .client_key_shares([KeyShare::X25519, KeyShare::P256])
+        .default_alps_protocols([b"h2".as_slice()])
+        .alps_use_new_codepoint(true);
 
+        assert_eq!(spec.min_tls_version_value(), Some(SslVersion::TLS1_2));
+        assert_eq!(spec.max_tls_version_value(), Some(SslVersion::TLS1_3));
         assert!(spec.grease_enabled());
         assert!(spec.ech_grease_enabled());
+        assert!(spec.ocsp_stapling_enabled());
+        assert!(spec.signed_cert_timestamps_enabled());
         assert_eq!(spec.key_shares(), &[KeyShare::X25519, KeyShare::P256]);
+        assert_eq!(spec.default_alps_protocols_ref(), &[b"h2".to_vec()]);
+        assert!(spec.alps_use_new_codepoint_enabled());
     }
 
     #[test]
@@ -922,6 +1137,10 @@ mod tests {
                             DEFAULT_VERIFY_ALGORITHM_PREFS,
                         )
                         .name("chrome_131")
+                        .min_tls_version(Some(SslVersion::TLS1_2))
+                        .max_tls_version(Some(SslVersion::TLS1_3))
+                        .enable_ocsp_stapling(true)
+                        .enable_signed_cert_timestamps(true)
                         .permute_extensions(true)
                         .preserve_tls13_cipher_list(true),
                     )
@@ -930,6 +1149,8 @@ mod tests {
             .unwrap();
 
         assert!(builder.options().contains(SslOptions::NO_TICKET));
+        assert_eq!(builder.min_proto_version(), Some(SslVersion::TLS1_2));
+        assert_eq!(builder.max_proto_version(), Some(SslVersion::TLS1_3));
         assert_eq!(
             TlsClientOptions::new()
                 .fingerprint_spec(
@@ -956,7 +1177,9 @@ mod tests {
                 DEFAULT_VERIFY_ALGORITHM_PREFS,
             )
             .enable_ech_grease(true)
-            .client_key_shares([KeyShare::X25519, KeyShare::P256]),
+            .client_key_shares([KeyShare::X25519, KeyShare::P256])
+            .default_alps_protocols([b"h2".as_slice()])
+            .alps_use_new_codepoint(true),
         );
 
         let connector = SslConnector::bare_builder(SslMethod::tls())
